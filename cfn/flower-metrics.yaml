@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: "2010-09-09"
+  
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+Parameters:
+  CwNamespace:
+    Type: String
+    Default: "FedLearn"
+Resources:
+  ProxyAccuracyMetricFilter: 
+    Type: AWS::Logs::MetricFilter
+    Properties: 
+      LogGroupName: "/ecs/FederatedLearning_flower-proxy"
+      FilterPattern: '{ $.accuracy = "*"}'
+      MetricTransformations: 
+        - 
+          MetricValue: "$.accuracy"
+          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Proxy"]]
+          MetricName: "Accuracy"
+  ProxyLossMetricFilter: 
+    Type: AWS::Logs::MetricFilter
+    Properties: 
+      LogGroupName: "/ecs/FederatedLearning_flower-proxy"
+      FilterPattern: '{ $.loss = "*"}'
+      MetricTransformations: 
+        - 
+          MetricValue: "$.loss"
+          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Proxy"]]
+          MetricName: "Loss"
+  CoordinatorClientsMetricFilter: 
+    Type: AWS::Logs::MetricFilter
+    Properties: 
+      LogGroupName: "/ecs/FederatedLearning_flower-coordinator"
+      FilterPattern: '[preamble, method="strategy", action="sampled", clients, ignore1, ignore2, ignore3, ignore4]'
+      MetricTransformations: 
+        - 
+          MetricValue: "$clients"
+          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Coordinator"]]
+          MetricName: "ClientCount"
+  CoordinatorSuccessMetricFilter: 
+    Type: AWS::Logs::MetricFilter
+    Properties: 
+      LogGroupName: "/ecs/FederatedLearning_flower-coordinator"
+      FilterPattern: '[preamble, method="received", s, ignore1, ignore2, f, ignore3]'
+      MetricTransformations: 
+        - 
+          MetricValue: "$s"
+          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Coordinator"]]
+          MetricName: "SuccessCount"
+  CoordinatorFailureMetricFilter: 
+    Type: AWS::Logs::MetricFilter
+    Properties: 
+      LogGroupName: "/ecs/FederatedLearning_flower-coordinator"
+      FilterPattern: '[preamble, method="received", s, ignore1, ignore2, f, ignore3]'
+      MetricTransformations: 
+        - 
+          MetricValue: "$f"
+          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Coordinator"]]
+          MetricName: "FailureCount"
+  CoordinatorTimeMetricFilter: 
+    Type: AWS::Logs::MetricFilter
+    Properties: 
+      LogGroupName: "/ecs/FederatedLearning_flower-coordinator"
+      FilterPattern: '[preamble, method="finished", ignore, time]'
+      MetricTransformations: 
+        - 
+          MetricValue: "$time"
+          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Coordinator"]]
+          MetricName: "RunTime"
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties: 
+      DashboardName: "Flower-FL-Metrics"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+              {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 0,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "metrics": [
+                          [ "FedLearn/Coordinator", "ClientCount" ]
+                      ],
+                      "region": "${AWS::Region}",
+                      "title": "Total number of clients"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 6,
+                  "y": 0,
+                  "width": 6,
+                  "height": 3,
+                  "properties": {
+                      "metrics": [
+                          [ "FedLearn/Coordinator", "SuccessCount" ]
+                      ],
+                      "view": "singleValue",
+                      "region": "${AWS::Region}",
+                      "stat": "Minimum",
+                      "period": 300,
+                      "title": "Minimum successful clients"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 6,
+                  "y": 3,
+                  "width": 6,
+                  "height": 3,
+                  "properties": {
+                      "metrics": [
+                          [ "FedLearn/Coordinator", "FailureCount" ]
+                      ],
+                      "view": "singleValue",
+                      "region": "${AWS::Region}",
+                      "stat": "Maximum",
+                      "period": 300,
+                      "title": "Maximum failed clients"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 12,
+                  "y": 0,
+                  "width": 6,
+                  "height": 3,
+                  "properties": {
+                      "metrics": [
+                          [ "FedLearn/Coordinator", "RunTime" ]
+                      ],
+                      "view": "singleValue",
+                      "region": "${AWS::Region}",
+                      "stat": "Maximum",
+                      "period": 300,
+                      "title": "Run time in seconds"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 0,
+                  "y": 6,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "metrics": [
+                          [ "FedLearn/Proxy", "Accuracy" ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "region": "${AWS::Region}",
+                      "stat": "Average",
+                      "period": 10,
+                      "title": "Accuracy (clients)"
+                  }
+              },
+              {
+                  "type": "metric",
+                  "x": 6,
+                  "y": 6,
+                  "width": 6,
+                  "height": 6,
+                  "properties": {
+                      "metrics": [
+                          [ "FedLearn/Proxy", "Loss" ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "region": "${AWS::Region}",
+                      "stat": "Average",
+                      "period": 10
+                  }
+              }
+          ]
+        }

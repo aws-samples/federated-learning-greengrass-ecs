@@ -1,0 +1,6 @@
+{
+    "DEF_UNIQUE_KEY": "",
+    "TABLE": "FederatedLearning-FLTable",
+    "RULE_ROLE_ARN": "",
+    "DATASET_PARAM": "/FederatedLearning/DatasetName"
+}

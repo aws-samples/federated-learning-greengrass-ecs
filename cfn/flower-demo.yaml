@@ -1,0 +1,953 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+Description: >
+  This template deploys components to demonstrate federated learning
+  using simulated IoT devices.
+
+Parameters:
+  vpccidr:
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be a valid CIDR range in the form x.x.x.x/16
+    Default: 10.20.0.0/16
+  subnetcidr:
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be a valid CIDR range in the form x.x.x.x/24
+    Default: 10.20.1.0/24
+  subnetcidrPublic:
+    Type: String
+    MinLength: 9
+    MaxLength: 18
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be a valid CIDR range in the form x.x.x.x/24
+    Default: 10.20.2.0/24
+  Bucket:
+    Type: String
+    Description: "Name of the S3 bucket containing the lambda function"
+  Prefix:
+    Type: String
+    Description: "Prefix of the lambda function package in the S3 bucket"
+    Default: "lambda/flower.zip"
+  ProjectTag:
+    Type: String
+    Default: "FederatedLearning"
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  GgInstanceType:
+    Type: String
+    Default: "m5.2xlarge"
+
+Resources:
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: !Ref vpccidr
+      EnableDnsHostnames: 'true'
+      EnableDnsSupport: 'true'
+      Tags:
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        -
+          Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-VPC"]]
+  IGW:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        -
+          Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-IGW"]]
+  GatewayAttach:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref IGW
+      VpcId: !Ref VPC
+  Subnet: 
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref subnetcidr
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref VPC
+      Tags:
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        -
+          Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-Subnet-PrivateA"]]
+  SubnetPublic:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Ref subnetcidrPublic
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        -
+          Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-Subnet-PublicA"]]
+  SubnetRouteTableAssociatePublic: # Associates the subnet with a route table - passed via import
+    DependsOn: SubnetPublic
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTablePublic
+      SubnetId: !Ref SubnetPublic
+  SubnetRouteTableAssociate: # Associates the subnet with a route table - passed via import
+    DependsOn: Subnet
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId: !Ref RouteTablePrivate
+      SubnetId: !Ref Subnet
+  RouteDefaultPublic:
+    Type: "AWS::EC2::Route"
+    DependsOn: GatewayAttach
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW
+      RouteTableId: !Ref RouteTablePublic
+  RouteDefaultPrivate:
+    Type: "AWS::EC2::Route"
+    DependsOn: GatewayAttach
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref RouteTablePrivate
+  RouteTablePublic:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+  RouteTablePrivate:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId: !Ref VPC
+  EIPNatGW:
+    DependsOn: GatewayAttach
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc
+  NatGateway:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt EIPNatGW.AllocationId
+      SubnetId: !Ref SubnetPublic
+      Tags:
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        -
+          Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-NatGW"]]
+  SGCore:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: !Join ["", ["Stack ", !Ref "AWS::StackId", " GGCore"]]
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  SGContainers:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: !Join ["", ["Stack ", !Ref "AWS::StackId", " Flower"]]
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  InboundRuleCore:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SGCore
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref SGCore
+      ToPort: "8883"
+      FromPort: "8883"
+  InboundRuleContainers:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SGContainers
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref SGContainers
+  OutboundRuleCore:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      CidrIp: "0.0.0.0/0"
+      IpProtocol: "-1"
+      GroupId:
+        Fn::GetAtt:
+        - SGCore
+        - GroupId
+  OutboundRuleContainers:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      CidrIp: "0.0.0.0/0"
+      IpProtocol: "-1"
+      GroupId:
+        Fn::GetAtt:
+        - SGContainers
+        - GroupId
+  DDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions:
+        - AttributeName: client
+          AttributeType: S
+        - AttributeName: type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: client
+          KeyType: HASH
+        - AttributeName: type
+          KeyType: RANGE
+      BillingMode: "PAY_PER_REQUEST"
+      TableName: !Join ["", [!Ref ProjectTag, "-FLTable"]]
+      Tags: 
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        -
+          Key: Name
+          Value: !Join ["", [!Ref ProjectTag, "-FLTable"]]
+  CoordinatorTaskRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+                - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Join ["", [!Ref ProjectTag, "-CoordinatorTaskPolicy"]]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [
+                  "states:SendTaskSuccess",
+                  "states:SendTaskFailure",
+                  "states:SendTaskHeartbeat"
+                ]
+                Resource: '*'
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  ProxyBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+      VersioningConfiguration:
+        Status: "Enabled"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  ProxyTaskRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Join ["", [!Ref ProjectTag, "-CoordinatorTaskPolicy"]]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [
+                  "dynamodb:List*",
+                  "dynamodb:DescribeReservedCapacity*",
+                  "dynamodb:DescribeLimits",
+                  "dynamodb:DescribeTimeToLive"
+                ]
+                Resource: '*'
+              - Effect: Allow
+                Action: [
+                  "dynamodb:BatchGet*",
+                  "dynamodb:DescribeStream",
+                  "dynamodb:DescribeTable",
+                  "dynamodb:Get*",
+                  "dynamodb:Query",
+                  "dynamodb:Scan",
+                  "dynamodb:BatchWrite*",
+                  "dynamodb:CreateTable",
+                  "dynamodb:Delete*",
+                  "dynamodb:Update*",
+                  "dynamodb:PutItem"
+                ]
+                Resource: !GetAtt DDBTable.Arn
+              - Effect: Allow
+                Action: [
+                  "s3:ListBucket",
+                  "s3:GetBucketLocation"
+                ]
+                Resource: !GetAtt ProxyBucket.Arn
+              - Effect: Allow
+                Action: [
+                  "s3:PutObject",
+                  "s3:PutObjectAcl",
+                  "s3:GetObject",
+                  "s3:GetObjectAcl",
+                  "s3:DeleteObject"
+                ]
+                Resource: !Sub "${ProxyBucket.Arn}/*"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+        - "arn:aws:iam::aws:policy/AWSIoTDataAccess"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+    Properties:
+      ClusterName: !Join ["", [!Ref ProjectTag, "-FargateCluster"]]
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  ProxyTaskDef:
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      TaskRoleArn: !Ref ProxyTaskRole
+      ExecutionRoleArn: !Ref ProxyTaskRole
+      Family: !Join ["", [!Ref ProjectTag, "-ProxyTaskDef"]]
+      NetworkMode: "awsvpc"
+      Memory: 4096
+      Cpu: 2048
+      RequiresCompatibilities: ["FARGATE"]
+      RuntimePlatform:
+        OperatingSystemFamily: "LINUX"
+      ContainerDefinitions:
+        - Name: flower-proxy
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/flower-proxy:latest"
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-group: !Sub "/ecs/${ProjectTag}_flower-proxy"
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: "ecs"
+              awslogs-create-group: "true"
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 8080
+              Protocol: "tcp"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  CoordinatorTaskDef:
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      TaskRoleArn: !Ref CoordinatorTaskRole
+      ExecutionRoleArn: !Ref CoordinatorTaskRole
+      Family: !Join ["", [!Ref ProjectTag, "-CoordinatorTaskDef"]]
+      NetworkMode: "awsvpc"
+      Memory: 4096
+      Cpu: 2048
+      RequiresCompatibilities: ["FARGATE"]
+      RuntimePlatform:
+        OperatingSystemFamily: "LINUX"
+      ContainerDefinitions:
+        - Name: flower-coordinator
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/flower-coordinator:latest"
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-group: !Sub "/ecs/${ProjectTag}_flower-coordinator"
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: "ecs"
+              awslogs-create-group: "true"
+          PortMappings:
+            - ContainerPort: 8080
+              HostPort: 8080
+              Protocol: "tcp"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  GgFn:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Description: "This function runs on the GG Core device"
+      FunctionName: !Join ["", [!Ref ProjectTag, "-FlowerFn"]]
+      MemorySize: 4096
+      Runtime: "python3.7"
+      Timeout: 300
+      Role: !GetAtt FnRole.Arn
+      Handler: "flower.function_handler"
+      Code: 
+        S3Bucket: !Ref Bucket
+        S3Key: !Ref Prefix
+      Tags:
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+  FnRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+                - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  FnVersion:
+    Type: "AWS::Lambda::Version"
+    Properties:     
+      FunctionName: !GetAtt GgFn.Arn
+  FnAlias:
+    Type: "AWS::Lambda::Alias"
+    Properties:     
+      FunctionName: !GetAtt GgFn.Arn
+      FunctionVersion: !GetAtt FnVersion.Version
+      Name: "GgFnStable"
+  SsmInstanceProfile: 
+    Type: "AWS::IAM::InstanceProfile"
+    Properties: 
+      Path: "/"
+      Roles: 
+        - 
+          Ref: "SsmRole"
+
+  SsmRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  CoreServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          default:
+            - config-server
+        config-server:
+          packages:
+            yum:
+              java-1.8.0-openjdk: []
+              python3: []
+              python3-pip: []
+          files:
+            "/etc/python-reqs/requirements.txt":
+              content: |
+                aws-cfn-bootstrap==2.0
+                beautifulsoup4==4.10.0
+                boto3==1.20.11
+                botocore==1.23.11
+                cbor2==4.1.2
+                docutils==0.14
+                flwr==0.17.0
+                google==2.0.3
+                greengrasssdk==1.6.0
+                grpcio==1.42.0
+                jmespath==0.10.0
+                lockfile==0.11.0
+                numpy==1.21.4
+                Pillow==8.4.0
+                protobuf==3.19.1
+                pystache==0.5.4
+                python-daemon==2.2.3
+                python-dateutil==2.8.2
+                s3transfer==0.5.0
+                simplejson==3.2.0
+                six==1.16.0
+                soupsieve==2.3.1
+                torch==1.10.0
+                torchvision==0.11.1
+                typing-extensions==4.0.0
+                urllib3==1.26.7
+              mode: "000755"
+              owner: root
+              group: root
+          commands:
+            pip_installs:
+              command: /usr/bin/pip3 install -r /etc/python-reqs/requirements.txt
+    Properties:
+      LaunchTemplateName:  !Join ["", [!Ref ProjectTag, "-CoreServerLaunchTemplate"]]
+      TagSpecifications:
+        - ResourceType: "launch-template"
+          Tags:
+            - Key: Project
+              Value: !Ref ProjectTag
+      LaunchTemplateData:
+        SecurityGroupIds: [!GetAtt SGCore.GroupId]
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref GgInstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt SsmInstanceProfile.Arn
+
+  CoreServerA:
+    DependsOn: NatGateway
+    Type: "AWS::EC2::Instance"
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: "PT15M"
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref CoreServerLaunchTemplate
+        Version: !GetAtt CoreServerLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref Subnet
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash
+            echo "ec2user!" | passwd --stdin ec2-user
+            yum -y update
+            yum update -y aws-cfn-bootstrap # good practice - always do this.
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource CoreServerLaunchTemplate --region ${AWS::Region}
+
+            # TODO https://docs.aws.amazon.com/greengrass/v1/developerguide/quick-start.html#gg-device-setup-silent-mode
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource CoreServerA --region ${AWS::Region}
+      Tags:
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        -
+          Key: Name
+          Value: !Join ["-", ["GGCoreA", !Ref "AWS::StackId"]]
+
+  CoreServerB:
+    DependsOn: NatGateway
+    Type: "AWS::EC2::Instance"
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: "PT15M"
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref CoreServerLaunchTemplate
+        Version: !GetAtt CoreServerLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref Subnet
+      UserData:
+        "Fn::Base64":
+          !Sub |
+          #!/bin/bash
+          echo "ec2user!" | passwd --stdin ec2-user
+          yum -y update
+          yum update -y aws-cfn-bootstrap # good practice - always do this.
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource CoreServerLaunchTemplate --region ${AWS::Region}
+
+          # TODO https://docs.aws.amazon.com/greengrass/v1/developerguide/quick-start.html#gg-device-setup-silent-mode
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource CoreServerB --region ${AWS::Region}
+      Tags:
+        -
+          Key: Project
+          Value: !Ref ProjectTag
+        -
+          Key: Name
+          Value: !Join ["-", ["GGCoreB", !Ref "AWS::StackId"]]
+
+  GgRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "greengrass.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: !Join ["", [!Ref ProjectTag, "-GGCorePolicy"]]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents"
+                ]
+                Resource: '*'
+              - Effect: Allow
+                Action: [
+                  "s3:ListBucket",
+                  "s3:GetBucketLocation"
+                ]
+                Resource: !GetAtt ProxyBucket.Arn
+              - Effect: Allow
+                Action: [
+                  "s3:PutObject",
+                  "s3:PutObjectAcl",
+                  "s3:GetObject",
+                  "s3:GetObjectAcl",
+                  "s3:DeleteObject"
+                ]
+                Resource: !Sub "${ProxyBucket.Arn}/*"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSGreengrassResourceAccessRolePolicy"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+  IotRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "iot.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: !Join ["", [!Ref ProjectTag, "-IoTPolicy"]]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [
+                  "dynamodb:List*",
+                  "dynamodb:DescribeReservedCapacity*",
+                  "dynamodb:DescribeLimits",
+                  "dynamodb:DescribeTimeToLive"
+                ]
+                Resource: '*'
+              - Effect: Allow
+                Action: [
+                  "dynamodb:BatchGet*",
+                  "dynamodb:DescribeStream",
+                  "dynamodb:DescribeTable",
+                  "dynamodb:Get*",
+                  "dynamodb:Query",
+                  "dynamodb:Scan",
+                  "dynamodb:BatchWrite*",
+                  "dynamodb:CreateTable",
+                  "dynamodb:Delete*",
+                  "dynamodb:Update*",
+                  "dynamodb:PutItem"
+                ]
+                Resource: !GetAtt DDBTable.Arn
+              - Effect: Allow
+                Action: [
+                  "iotanalytics:BatchPutMessage"
+                ]
+                Resource: !Join ["", ["arn:aws:iotanalytics:", !Ref AWS::Region, ":", !Ref AWS::AccountId, ":channel/*"]]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  # ---------- Step Functions ---------
+  StateMachineTaskRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+      Policies:
+        - PolicyName: !Join ["", [!Ref ProjectTag, "-StateMachineTaskPolicy"]]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [
+                  "xray:PutTraceSegments",
+                  "xray:PutTelemetryRecords",
+                  "xray:GetSamplingRules",
+                  "xray:GetSamplingTargets",
+                  "iot:DescribeEndpoint",
+                  "iotanalytics:GetDatasetContent"
+                ]
+                Resource: '*'
+              - Effect: Allow
+                Action: [
+                  "ssm:GetParameter",
+                ]
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectTag}/DatasetName"
+              - Effect: Allow
+                Action: [
+                  "lambda:InvokeFunction"
+                ]
+                Resource: !Sub "${GetDatasetContentLambda.Arn}*"
+              - Effect: Allow
+                Action: [
+                  "ecs:RunTask"
+                ]
+                Resource: !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${ProjectTag}*"
+              - Effect: Allow
+                Action: [
+                  "iam:PassRole"
+                ]
+                Resource: [
+                  !GetAtt CoordinatorTaskRole.Arn,
+                  !GetAtt ProxyTaskRole.Arn
+                ]
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+
+  GetDatasetContentLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Downloads IOT Analytics Dataset content as a csv and returns the first column as a list
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt FnRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import csv
+          import urllib.request
+          import codecs
+
+          def lambda_handler(event, context):
+              url = event['DataURI'];
+              ftpstream = urllib.request.urlopen(url)
+              csvfile = csv.reader(codecs.iterdecode(ftpstream, 'utf-8'))
+              next(csvfile);
+              return {
+                  'statusCode': 200,
+                  'Payload': [line[0] for line in csvfile]
+              }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Join ["", [!Ref ProjectTag, "-StateMachine"]]
+      RoleArn: !GetAtt StateMachineTaskRole.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectTag
+      Definition:
+        Comment: Deploys flower-coordinator and flower-proxy ecs tasks
+        StartAt: DescribeIotEndpoint
+        States:
+          DescribeIotEndpoint:
+            Type: Task
+            Next: GetDatasetNameParameter
+            Parameters:
+              EndpointType: iot:Data-ATS
+            Resource: arn:aws:states:::aws-sdk:iot:describeEndpoint
+            ResultPath: $.EndpointResult
+            ResultSelector:
+              EndpointAddress.$: $.EndpointAddress
+          GetDatasetNameParameter:
+            Type: Task
+            Next: EndpointAndDatasetExist
+            Parameters:
+              Name: !Sub /${ProjectTag}/DatasetName
+            Resource: arn:aws:states:::aws-sdk:ssm:getParameter
+            ResultPath: $.DatasetNameResult
+            ResultSelector:
+              DatasetName.$: $.Parameter.Value
+          EndpointAndDatasetExist:
+            Type: Choice
+            Choices:
+              - And:
+                  - Variable: $.DatasetNameResult.DatasetName
+                    IsPresent: true
+                  - Variable: $.EndpointResult.EndpointAddress
+                    IsPresent: true
+                Next: GetDatasetContent
+            Default: Fail
+          GetDatasetContent:
+            Type: Task
+            Parameters:
+              DatasetName.$: $.DatasetNameResult.DatasetName
+            Resource: arn:aws:states:::aws-sdk:iotanalytics:getDatasetContent
+            Next: GetClientList
+            ResultSelector:
+              DataURI.$: $.Entries[0].DataURI
+            ResultPath: $.DatasetResult
+          GetClientList:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !Sub "${GetDatasetContentLambda.Arn}:$LATEST"
+              Payload:
+                DataURI.$: $.DatasetResult.DataURI
+            Retry:
+              - ErrorEquals:
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 6
+                BackoffRate: 2
+            Next: ClientsFound
+            ResultPath: $.ClientListResult
+            ResultSelector:
+              Payload.$: $.Payload.Payload
+          ClientsFound:
+            Type: Choice
+            Choices:
+              - Variable: $.ClientListResult.Payload[0]
+                IsPresent: true
+                Next: RunTask-FlowerCoordinator
+            Default: Fail
+          RunTask-FlowerCoordinator:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.waitForTaskToken
+            Parameters:
+              LaunchType: FARGATE
+              Cluster: !GetAtt ECSCluster.Arn
+              TaskDefinition: !Ref CoordinatorTaskDef
+              Overrides:
+                ContainerOverrides:
+                  - Name: flower-coordinator
+                    Environment:
+                      - Name: TASK_TOKEN
+                        Value.$: $$.Task.Token
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  SecurityGroups:
+                    - !GetAtt SGContainers.GroupId
+                  Subnets:
+                    - !Ref Subnet
+            Next: MapGreenGrassClients
+            ResultPath: $.RunTaskResult
+          MapGreenGrassClients:
+            Type: Map
+            Next: Success
+            Iterator:
+              StartAt: RunTask-FlowerProxy
+              States:
+                RunTask-FlowerProxy:
+                  Type: Task
+                  Resource: arn:aws:states:::ecs:runTask
+                  Parameters:
+                    LaunchType: FARGATE
+                    Cluster: !GetAtt ECSCluster.Arn
+                    TaskDefinition: !Ref ProxyTaskDef
+                    NetworkConfiguration:
+                      AwsvpcConfiguration:
+                        SecurityGroups:
+                          - !GetAtt SGContainers.GroupId
+                        Subnets:
+                          - !Ref Subnet
+                    Overrides:
+                      ContainerOverrides:
+                        - Name: flower-proxy
+                          Environment:
+                            - Name: CLIENT
+                              Value.$: $.client
+                            - Name: ENDPOINT
+                              Value.$: $.endpoint
+                            - Name: COORDINATOR
+                              Value.$: $.coordinator
+                            - Name: TABLE
+                              Value: !Ref DDBTable
+                            - Name: BUCKET
+                              Value: !Ref ProxyBucket
+                  End: true
+            ItemsPath: $.ClientListResult.Payload
+            Parameters:
+              coordinator.$: States.Format('{}:8080', $.RunTaskResult)
+              client.$: $$.Map.Item.Value
+              endpoint.$: States.Format('https://{}', $.EndpointResult.EndpointAddress)
+          Success:
+            Type: Succeed
+          Fail:
+            Type: Fail
+
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+  SubnetId:
+    Description: Subnet ID 
+    Value: !Ref Subnet
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref DDBTable
+  CoreA:
+    Description: Instance ID of GGCoreA server
+    Value: !Ref CoreServerA
+  CoreB:
+    Description: Instance ID of GGCoreB server
+    Value: !Ref CoreServerB
+  GgRoleName:
+    Description: Name of GreenGrass core role
+    Value: !Ref GgRole
+  GgRoleArn:
+    Description: ARN of GreenGrass core role
+    Value: !GetAtt GgRole.Arn
+  IotRoleArn:
+    Description: ARN of IoT role
+    Value: !GetAtt IotRole.Arn
+  GgFnArn:
+    Description: ARN of GreenGrass function
+    Value: !Ref FnAlias
+  DatasetParam:
+    Description: The name of the SSM param to store the datasetname in
+    Value: !Sub /${ProjectTag}/DatasetName
