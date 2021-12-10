@@ -123,58 +123,28 @@ Now upload to S3.  You'll need the name of the S3 bucket you created earlier.
 ### Deploy starting resources with CloudFormation
 
 * Log in to the AWS console and switch to your desired region
+* Verify the [Service-linked role for Amazon ECS](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/using-service-linked-roles.html#create-service-linked-role) exists within your account.
 * Go to the CloudFormation console
 * Deploy the template `cfn/flower-demo.yaml`.  The default parameters should be fine in most cases.  You will need to provide the name of the S3 bucket you created earlier.
-
-### Set up GreenGrass core device
-
-We'll follow the [quick start](https://docs.aws.amazon.com/greengrass/v1/developerguide/quick-start.html) to turn an EC2 instance into a GreenGrass core device.  
-
-First, we'll use Session Manager to connect to the instance.
-
-* Go to the EC2 console and select the instance whose name starts with `GGCore`.
-* Click `Connect`.
-* Select `Session Manager` and press `Connect`.
-
-You should now have a connection opened in a browser tab.  Switch to the `ec2-user` account and run the quick start script.
-
-    sudo su - ec2-user
-    wget -q -O ./gg-device-setup-latest.sh https://d1onfpft10uf5o.cloudfront.net/greengrass-device-setup/downloads/gg-device-setup-latest.sh && chmod +x ./gg-device-setup-latest.sh && sudo -E ./gg-device-setup-latest.sh bootstrap-greengrass-interactive
-
-The script will prompt for several values.  You must override these:
-
-* Your AWS access key and secret key
-* The AWS region you want to work in
-
-You can leave the rest as the default settings.
-When the installation finished take note of the GG Core Group Id as it will be needed in the next step.
-
-**Repeat these steps for ALL GG Core instances**
 
 ### Finish configuring GreenGrass
 
 Edit the file `scripts/gg_setup.json` and insert the correct values for each item in the dictionary.
 
-* `GG_ROLE_ARN` - Refer to Cloudformation Output with key `GgRoleArn`
-* `FN_ARN` - Refer to Cloudformation Output with key `GgFnArn`
+* `STACK_NAME` - Provide the name of your Cloudformation Stack
 * `DEF_UNIQUE_KEY` - A unique identifier for this environment
-* `GG_GROUP` - Use the GG Group Id from the step above
 
 Run this python script to finish setting up subscriptions and other resources for GreenGrass.
 
     cd scripts
     python gg_setup.py
 
-**Repeat these steps for ALL GG groups**
-
 ### Deploy IoT rules and analytics
 
 Edit the file `scripts/iot_setup.json` and insert the correct values for each item in the dictionary.
 
-* `TABLE` - Refer to Cloudformation Output with key `TableName`
-* `RULE_ROLE_ARN` - Refer to Cloudformation Output with key `IotRoleArn`
-* `DATASET_PARAM` - Refer to Cloudformation Output with key `DatasetParam`
-* `DEF_UNIQUE_KEY` - Use a unique identifier for this environment
+* `STACK_NAME` - Provide the name of your Cloudformation Stack
+* `DEF_UNIQUE_KEY` - A unique identifier for this environment
  
 Run this python script to finish setting up IoT rules and analytics.
 
@@ -185,8 +155,8 @@ Run this python script to finish setting up IoT rules and analytics.
 
 Before executing the State Machine:
 
-* The Green Grass Core Lambda functions must complete initialization.  For details, see cloudwatch logs at: `/aws/greengrass/Lambda/${REGION}/${ACCOUNTID}/${PROJECT_TAG}-FlowerFn`
-* IOT Analytics DataSet must run at least once
+* The Green Grass Core Lambda functions must complete initialization.  This process typically takes 45-60 minutes.  For details, see cloudwatch logs at: `/aws/greengrass/Lambda/${REGION}/${ACCOUNTID}/${PROJECT_TAG}-FlowerFn`
+* IOT Analytics DataSet must run at least once.  By default the dataset runs at the start of every hour.
 
 Once the prerequisites above have been completed: 
 
@@ -216,12 +186,11 @@ We also prepared a dashboard called `Flower-FL-Metrics` that shows these data po
 
 Follow these steps to clean up the resources used in this workshop:
 
+* Execute the iot cleanup script: `python iot_setup.py --clean`
+* Execute the greengrass cleanup script: `python gg_setup.py --clean`
 * Delete the two CloudFormation templates
 * Delete the S3 bucket
 * Delete the two container images from ECR
-* Delete the GreenGrass group
-* Delete the IoT rules
-* Delete the IoT Analytics resources
 
 ## Security
 

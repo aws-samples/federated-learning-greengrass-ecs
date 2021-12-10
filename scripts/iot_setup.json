@@ -1,6 +1,4 @@
 {
-    "DEF_UNIQUE_KEY": "",
-    "TABLE": "FederatedLearning-FLTable",
-    "RULE_ROLE_ARN": "",
-    "DATASET_PARAM": "/FederatedLearning/DatasetName"
+    "STACK_NAME": "fedml",
+    "DEF_UNIQUE_KEY": "a49be4f10a82"
 }

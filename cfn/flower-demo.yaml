@@ -8,6 +8,11 @@ Description: >
   using simulated IoT devices.
 
 Parameters:
+  CoreServerCount:
+    Type: String
+    Default: 3
+    AllowedPattern: "^([2-9]|[1-3][0-9]|40)$"
+    ConstraintDescription: Must be a number between 2 - 40
   vpccidr:
     Type: String
     MinLength: 9
@@ -353,8 +358,8 @@ Resources:
       ExecutionRoleArn: !Ref ProxyTaskRole
       Family: !Join ["", [!Ref ProjectTag, "-ProxyTaskDef"]]
       NetworkMode: "awsvpc"
-      Memory: 4096
-      Cpu: 2048
+      Memory: 1024
+      Cpu: 512
       RequiresCompatibilities: ["FARGATE"]
       RuntimePlatform:
         OperatingSystemFamily: "LINUX"
@@ -382,8 +387,8 @@ Resources:
       ExecutionRoleArn: !Ref CoordinatorTaskRole
       Family: !Join ["", [!Ref ProjectTag, "-CoordinatorTaskDef"]]
       NetworkMode: "awsvpc"
-      Memory: 4096
-      Cpu: 2048
+      Memory: 1024
+      Cpu: 512
       RequiresCompatibilities: ["FARGATE"]
       RuntimePlatform:
         OperatingSystemFamily: "LINUX"
@@ -449,15 +454,15 @@ Resources:
       FunctionName: !GetAtt GgFn.Arn
       FunctionVersion: !GetAtt FnVersion.Version
       Name: "GgFnStable"
-  SsmInstanceProfile: 
+  CoreServerInstanceProfile: 
     Type: "AWS::IAM::InstanceProfile"
     Properties: 
       Path: "/"
       Roles: 
         - 
-          Ref: "SsmRole"
+          Ref: "CoreServerRole"
 
-  SsmRole: 
+  CoreServerRole:
     Type: "AWS::IAM::Role"
     Properties: 
       AssumeRolePolicyDocument: 
@@ -471,6 +476,35 @@ Resources:
             Action: 
               - "sts:AssumeRole"
       Path: "/"
+      Policies:
+        - PolicyName: !Join ["", [!Ref ProjectTag, "-GGServerPolicy"]]
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [
+                  "iam:CreateRole",
+                  "iam:AttachRolePolicy",
+                  "iam:PassRole",
+                  "greengrass:AssociateServiceRoleToAccount",
+                  "greengrass:CreateCoreDefinition",
+                  "greengrass:CreateFunctionDefinition",
+                  "greengrass:CreateGroup",
+                  "greengrass:CreateDeployment",
+                  "greengrass:GetDeploymentStatus",
+                  "greengrass:CreateSubscriptionDefinition",
+                  "greengrass:CreateLoggerDefinition",
+                  "greengrass:GetServiceRoleForAccount",
+                  "iot:CreateThing",
+                  "iot:CreateKeysAndCertificate",
+                  "iot:AttachThingPrincipal",
+                  "iot:CreatePolicy",
+                  "iot:GetPolicy",
+                  "iot:AttachPolicy",
+                  "iot:DescribeEndpoint",
+                  "lambda:CreateFunction"
+                ]
+                Resource: '*'
       ManagedPolicyArns:
         - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
       Tags:
@@ -489,6 +523,7 @@ Resources:
               java-1.8.0-openjdk: []
               python3: []
               python3-pip: []
+              jq: []
           files:
             "/etc/python-reqs/requirements.txt":
               content: |
@@ -536,69 +571,60 @@ Resources:
         ImageId: !Ref LatestAmiId
         InstanceType: !Ref GgInstanceType
         IamInstanceProfile:
-          Arn: !GetAtt SsmInstanceProfile.Arn
-
-  CoreServerA:
-    DependsOn: NatGateway
-    Type: "AWS::EC2::Instance"
-    CreationPolicy:
-      ResourceSignal:
-        Count: 1
-        Timeout: "PT15M"
-    Properties:
-      LaunchTemplate:
-        LaunchTemplateId: !Ref CoreServerLaunchTemplate
-        Version: !GetAtt CoreServerLaunchTemplate.LatestVersionNumber
-      SubnetId: !Ref Subnet
-      UserData:
-        "Fn::Base64":
-          !Sub |
+          Arn: !GetAtt CoreServerInstanceProfile.Arn
+        UserData:
+          "Fn::Base64":
+            !Sub |
             #!/bin/bash
-            echo "ec2user!" | passwd --stdin ec2-user
             yum -y update
             yum update -y aws-cfn-bootstrap # good practice - always do this.
             /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource CoreServerLaunchTemplate --region ${AWS::Region}
 
-            # TODO https://docs.aws.amazon.com/greengrass/v1/developerguide/quick-start.html#gg-device-setup-silent-mode
-            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource CoreServerA --region ${AWS::Region}
-      Tags:
-        -
-          Key: Project
-          Value: !Ref ProjectTag
-        -
-          Key: Name
-          Value: !Join ["-", ["GGCoreA", !Ref "AWS::StackId"]]
+            role=$(curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/)
+            creds=$(curl -s "http://169.254.169.254/latest/meta-data/iam/security-credentials/$role")
+            uuid=$(uuidgen)
 
-  CoreServerB:
+            # https://docs.aws.amazon.com/greengrass/v1/developerguide/quick-start.html#gg-device-setup-silent-mode
+            wget -q -O ./gg-device-setup-latest.sh https://d1onfpft10uf5o.cloudfront.net/greengrass-device-setup/downloads/gg-device-setup-latest.sh && \
+            chmod +x ./gg-device-setup-latest.sh && \
+            sudo -E ./gg-device-setup-latest.sh bootstrap-greengrass \
+            --aws-access-key-id $(echo $creds | jq -r '.AccessKeyId') \
+            --aws-secret-access-key $(echo $creds | jq -r '.SecretAccessKey') \
+            --aws-session-token $(echo $creds | jq -r '.Token') \
+            --group-name "${ProjectTag}-group-$uuid" \
+            --core-name "${ProjectTag}-core-$uuid" \
+            --region ${AWS::Region}
+
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource CoreServerASG --region ${AWS::Region}
+
+  CoreServerASG:
     DependsOn: NatGateway
-    Type: "AWS::EC2::Instance"
-    CreationPolicy:
-      ResourceSignal:
-        Count: 1
-        Timeout: "PT15M"
+    Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       LaunchTemplate:
         LaunchTemplateId: !Ref CoreServerLaunchTemplate
         Version: !GetAtt CoreServerLaunchTemplate.LatestVersionNumber
-      SubnetId: !Ref Subnet
-      UserData:
-        "Fn::Base64":
-          !Sub |
-          #!/bin/bash
-          echo "ec2user!" | passwd --stdin ec2-user
-          yum -y update
-          yum update -y aws-cfn-bootstrap # good practice - always do this.
-          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource CoreServerLaunchTemplate --region ${AWS::Region}
-
-          # TODO https://docs.aws.amazon.com/greengrass/v1/developerguide/quick-start.html#gg-device-setup-silent-mode
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource CoreServerB --region ${AWS::Region}
+      MinSize: 2
+      MaxSize: 40
+      DesiredCapacity: !Ref CoreServerCount
+      VPCZoneIdentifier: [!Ref Subnet]
       Tags:
-        -
-          Key: Project
+        - Key: Name
+          Value: !Sub ${ProjectTag}-GGCoreServers
+          PropagateAtLaunch: true
+        - Key: Project
           Value: !Ref ProjectTag
-        -
-          Key: Name
-          Value: !Join ["-", ["GGCoreB", !Ref "AWS::StackId"]]
+          PropagateAtLaunch: true
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: "PT15M"
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: "PT15M"
+        WaitOnResourceSignals: true
 
   GgRole:
     Type: "AWS::IAM::Role"
@@ -744,6 +770,19 @@ Resources:
                 Resource: !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${ProjectTag}*"
               - Effect: Allow
                 Action: [
+                  "ecs:StopTask",
+                  "ecs:DescribeTasks"
+                ]
+                Resource: !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/${ECSCluster}/*"
+              - Effect: Allow
+                Action: [
+                  "events:PutTargets",
+                  "events:PutRule",
+                  "events:DescribeRule"
+                ]
+                Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule"
+              - Effect: Allow
+                Action: [
                   "iam:PassRole"
                 ]
                 Resource: [
@@ -790,101 +829,111 @@ Resources:
           Value: !Ref ProjectTag
       Definition:
         Comment: Deploys flower-coordinator and flower-proxy ecs tasks
-        StartAt: DescribeIotEndpoint
+        StartAt: GetIotConfig
         States:
-          DescribeIotEndpoint:
-            Type: Task
-            Next: GetDatasetNameParameter
-            Parameters:
-              EndpointType: iot:Data-ATS
-            Resource: arn:aws:states:::aws-sdk:iot:describeEndpoint
-            ResultPath: $.EndpointResult
+          GetIotConfig:
+            Type: Parallel
+            Next: IotConfigFound
+            Branches:
+              - StartAt: DescribeIotEndpoint
+                States:
+                  DescribeIotEndpoint:
+                    Parameters:
+                      EndpointType: iot:Data-ATS
+                    Resource: arn:aws:states:::aws-sdk:iot:describeEndpoint
+                    ResultSelector:
+                      IotEndpointAddress.$: $.EndpointAddress
+                    Type: Task
+                    End: true
+              - StartAt: GetDatasetNameParameter
+                States:
+                  GetDatasetNameParameter:
+                    Parameters:
+                      Name: !Sub /${ProjectTag}/DatasetName
+                    Resource: arn:aws:states:::aws-sdk:ssm:getParameter
+                    ResultSelector:
+                      DatasetName.$: $.Parameter.Value
+                    Type: Task
+                    Next: GetDatasetContent
+                  GetDatasetContent:
+                    Parameters:
+                      DatasetName.$: $.DatasetName
+                    Resource: arn:aws:states:::aws-sdk:iotanalytics:getDatasetContent
+                    ResultSelector:
+                      DataURI.$: $.Entries[0].DataURI
+                    Type: Task
+                    Next: GetClientList
+                  GetClientList:
+                    Parameters:
+                      FunctionName: !Sub "${GetDatasetContentLambda.Arn}:$LATEST"
+                      Payload:
+                        DataURI.$: $.DataURI
+                    Resource: arn:aws:states:::lambda:invoke
+                    ResultSelector:
+                      ClientList.$: $.Payload.Payload
+                    Retry:
+                      - BackoffRate: 2
+                        ErrorEquals:
+                          - Lambda.ServiceException
+                          - Lambda.AWSLambdaException
+                          - Lambda.SdkClientException
+                        IntervalSeconds: 2
+                        MaxAttempts: 6
+                    Type: Task
+                    End: true
             ResultSelector:
-              EndpointAddress.$: $.EndpointAddress
-          GetDatasetNameParameter:
-            Type: Task
-            Next: EndpointAndDatasetExist
-            Parameters:
-              Name: !Sub /${ProjectTag}/DatasetName
-            Resource: arn:aws:states:::aws-sdk:ssm:getParameter
-            ResultPath: $.DatasetNameResult
-            ResultSelector:
-              DatasetName.$: $.Parameter.Value
-          EndpointAndDatasetExist:
-            Type: Choice
+              ClientList.$: $[1].ClientList
+              IotEndpointAddress.$: $[0].IotEndpointAddress
+          CoordinatorTaskComplete:
             Choices:
               - And:
-                  - Variable: $.DatasetNameResult.DatasetName
-                    IsPresent: true
-                  - Variable: $.EndpointResult.EndpointAddress
-                    IsPresent: true
-                Next: GetDatasetContent
-            Default: Fail
-          GetDatasetContent:
-            Type: Task
-            Parameters:
-              DatasetName.$: $.DatasetNameResult.DatasetName
-            Resource: arn:aws:states:::aws-sdk:iotanalytics:getDatasetContent
-            Next: GetClientList
-            ResultSelector:
-              DataURI.$: $.Entries[0].DataURI
-            ResultPath: $.DatasetResult
-          GetClientList:
-            Type: Task
-            Resource: arn:aws:states:::lambda:invoke
-            Parameters:
-              FunctionName: !Sub "${GetDatasetContentLambda.Arn}:$LATEST"
-              Payload:
-                DataURI.$: $.DatasetResult.DataURI
-            Retry:
-              - ErrorEquals:
-                  - Lambda.ServiceException
-                  - Lambda.AWSLambdaException
-                  - Lambda.SdkClientException
-                IntervalSeconds: 2
-                MaxAttempts: 6
-                BackoffRate: 2
-            Next: ClientsFound
-            ResultPath: $.ClientListResult
-            ResultSelector:
-              Payload.$: $.Payload.Payload
-          ClientsFound:
+                  - StringMatches: STOPPED
+                    Variable: $.Tasks[0].Containers[0].LastStatus
+                  - NumericEquals: 0
+                    Variable: $.Tasks[0].Containers[0].ExitCode
+                Next: Success
+              - And:
+                  - StringMatches: STOPPED
+                    Variable: $.Tasks[0].Containers[0].LastStatus
+                  - Not:
+                      NumericEquals: 0
+                      Variable: $.Tasks[0].Containers[0].ExitCode
+                Next: Fail
+            Default: WaitForCoordinatorTask
             Type: Choice
+          IotConfigFound:
             Choices:
-              - Variable: $.ClientListResult.Payload[0]
-                IsPresent: true
+              - And:
+                  - Variable: $.ClientList
+                    IsPresent: true
+                  - Variable: $.ClientList[0]
+                    IsPresent: true
+                  - Variable: $.IotEndpointAddress
+                    IsPresent: true
                 Next: RunTask-FlowerCoordinator
             Default: Fail
-          RunTask-FlowerCoordinator:
+            Type: Choice
+          DescribeCoordinatorTask:
             Type: Task
-            Resource: arn:aws:states:::ecs:runTask.waitForTaskToken
+            Next: CoordinatorTaskComplete
             Parameters:
-              LaunchType: FARGATE
               Cluster: !GetAtt ECSCluster.Arn
-              TaskDefinition: !Ref CoordinatorTaskDef
-              Overrides:
-                ContainerOverrides:
-                  - Name: flower-coordinator
-                    Environment:
-                      - Name: TASK_TOKEN
-                        Value.$: $$.Task.Token
-              NetworkConfiguration:
-                AwsvpcConfiguration:
-                  SecurityGroups:
-                    - !GetAtt SGContainers.GroupId
-                  Subnets:
-                    - !Ref Subnet
-            Next: MapGreenGrassClients
-            ResultPath: $.RunTaskResult
+              Tasks.$: States.Array($.CoordinatorTaskResult.taskArn)
+            Resource: arn:aws:states:::aws-sdk:ecs:describeTasks
           MapGreenGrassClients:
             Type: Map
-            Next: Success
+            Catch:
+              - ErrorEquals:
+                  - States.TaskFailed
+                Next: StopCoordinatorTask
+            ResultPath: $.mapClientsResult
+            Next: WaitForCoordinatorTask
             Iterator:
               StartAt: RunTask-FlowerProxy
               States:
                 RunTask-FlowerProxy:
                   Type: Task
-                  Resource: arn:aws:states:::ecs:runTask
+                  Resource: arn:aws:states:::ecs:runTask.sync
                   Parameters:
                     LaunchType: FARGATE
                     Cluster: !GetAtt ECSCluster.Arn
@@ -910,17 +959,52 @@ Resources:
                             - Name: BUCKET
                               Value: !Ref ProxyBucket
                   End: true
-            ItemsPath: $.ClientListResult.Payload
+            ItemsPath: $.ClientList
             Parameters:
-              coordinator.$: States.Format('{}:8080', $.RunTaskResult)
+              coordinator.$: States.Format('{}:8080', $.CoordinatorTaskResult.ip)
               client.$: $$.Map.Item.Value
-              endpoint.$: States.Format('https://{}', $.EndpointResult.EndpointAddress)
+              endpoint.$: States.Format('https://{}', $.IotEndpointAddress)
+          RunTask-FlowerCoordinator:
+            Type: Task
+            Resource: arn:aws:states:::ecs:runTask.waitForTaskToken
+            HeartbeatSeconds: 600
+            Parameters:
+              LaunchType: FARGATE
+              Cluster: !GetAtt ECSCluster.Arn
+              TaskDefinition: !Ref CoordinatorTaskDef
+              Overrides:
+                ContainerOverrides:
+                  - Name: flower-coordinator
+                    Environment:
+                      - Name: TASK_TOKEN
+                        Value.$: $$.Task.Token
+              NetworkConfiguration:
+                AwsvpcConfiguration:
+                  SecurityGroups:
+                    - !GetAtt SGContainers.GroupId
+                  Subnets:
+                    - !Ref Subnet
+            Next: MapGreenGrassClients
+            ResultPath: $.CoordinatorTaskResult
+          StopCoordinatorTask:
+            Type: Task
+            Parameters:
+              Task.$: $.CoordinatorTaskResult.taskArn
+            Resource: arn:aws:states:::aws-sdk:ecs:stopTask
+            Next: Fail
+          WaitForCoordinatorTask:
+            Next: DescribeCoordinatorTask
+            Seconds: 60
+            Type: Wait
           Success:
             Type: Succeed
           Fail:
             Type: Fail
 
 Outputs:
+  ProjectTag:
+    Description: The Project Tag
+    Value: !Ref ProjectTag
   VpcId:
     Description: VPC ID
     Value: !Ref VPC
@@ -930,12 +1014,6 @@ Outputs:
   TableName:
     Description: DynamoDB table name
     Value: !Ref DDBTable
-  CoreA:
-    Description: Instance ID of GGCoreA server
-    Value: !Ref CoreServerA
-  CoreB:
-    Description: Instance ID of GGCoreB server
-    Value: !Ref CoreServerB
   GgRoleName:
     Description: Name of GreenGrass core role
     Value: !Ref GgRole

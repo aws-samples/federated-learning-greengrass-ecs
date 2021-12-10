@@ -4,73 +4,73 @@ AWSTemplateFormatVersion: "2010-09-09"
 # SPDX-License-Identifier: MIT-0
 
 Parameters:
-  CwNamespace:
+  ProjectTag:
     Type: String
-    Default: "FedLearn"
+    Default: "FederatedLearning"
 Resources:
-  ProxyAccuracyMetricFilter: 
+  ProxyAccuracyMetricFilter:
     Type: AWS::Logs::MetricFilter
-    Properties: 
-      LogGroupName: "/ecs/FederatedLearning_flower-proxy"
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectTag}_flower-proxy"
       FilterPattern: '{ $.accuracy = "*"}'
-      MetricTransformations: 
-        - 
+      MetricTransformations:
+        -
           MetricValue: "$.accuracy"
-          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Proxy"]]
+          MetricNamespace: !Join ["/", [!Ref ProjectTag, "Proxy"]]
           MetricName: "Accuracy"
-  ProxyLossMetricFilter: 
+  ProxyLossMetricFilter:
     Type: AWS::Logs::MetricFilter
-    Properties: 
-      LogGroupName: "/ecs/FederatedLearning_flower-proxy"
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectTag}_flower-proxy"
       FilterPattern: '{ $.loss = "*"}'
-      MetricTransformations: 
-        - 
+      MetricTransformations:
+        -
           MetricValue: "$.loss"
-          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Proxy"]]
+          MetricNamespace: !Join ["/", [!Ref ProjectTag, "Proxy"]]
           MetricName: "Loss"
-  CoordinatorClientsMetricFilter: 
+  CoordinatorClientsMetricFilter:
     Type: AWS::Logs::MetricFilter
-    Properties: 
-      LogGroupName: "/ecs/FederatedLearning_flower-coordinator"
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectTag}_flower-coordinator"
       FilterPattern: '[preamble, method="strategy", action="sampled", clients, ignore1, ignore2, ignore3, ignore4]'
-      MetricTransformations: 
-        - 
+      MetricTransformations:
+        -
           MetricValue: "$clients"
-          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Coordinator"]]
+          MetricNamespace: !Join ["/", [!Ref ProjectTag, "Coordinator"]]
           MetricName: "ClientCount"
-  CoordinatorSuccessMetricFilter: 
+  CoordinatorSuccessMetricFilter:
     Type: AWS::Logs::MetricFilter
-    Properties: 
-      LogGroupName: "/ecs/FederatedLearning_flower-coordinator"
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectTag}_flower-coordinator"
       FilterPattern: '[preamble, method="received", s, ignore1, ignore2, f, ignore3]'
-      MetricTransformations: 
-        - 
+      MetricTransformations:
+        -
           MetricValue: "$s"
-          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Coordinator"]]
+          MetricNamespace: !Join ["/", [!Ref ProjectTag, "Coordinator"]]
           MetricName: "SuccessCount"
-  CoordinatorFailureMetricFilter: 
+  CoordinatorFailureMetricFilter:
     Type: AWS::Logs::MetricFilter
-    Properties: 
-      LogGroupName: "/ecs/FederatedLearning_flower-coordinator"
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectTag}_flower-coordinator"
       FilterPattern: '[preamble, method="received", s, ignore1, ignore2, f, ignore3]'
-      MetricTransformations: 
-        - 
+      MetricTransformations:
+        -
           MetricValue: "$f"
-          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Coordinator"]]
+          MetricNamespace: !Join ["/", [!Ref ProjectTag, "Coordinator"]]
           MetricName: "FailureCount"
-  CoordinatorTimeMetricFilter: 
+  CoordinatorTimeMetricFilter:
     Type: AWS::Logs::MetricFilter
-    Properties: 
-      LogGroupName: "/ecs/FederatedLearning_flower-coordinator"
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectTag}_flower-coordinator"
       FilterPattern: '[preamble, method="finished", ignore, time]'
-      MetricTransformations: 
-        - 
+      MetricTransformations:
+        -
           MetricValue: "$time"
-          MetricNamespace: !Join ["/", [!Ref CwNamespace, "Coordinator"]]
+          MetricNamespace: !Join ["/", [!Ref ProjectTag, "Coordinator"]]
           MetricName: "RunTime"
   Dashboard:
     Type: AWS::CloudWatch::Dashboard
-    Properties: 
+    Properties:
       DashboardName: "Flower-FL-Metrics"
       DashboardBody: !Sub |
         {
@@ -85,7 +85,7 @@ Resources:
                       "view": "timeSeries",
                       "stacked": false,
                       "metrics": [
-                          [ "FedLearn/Coordinator", "ClientCount" ]
+                          [ "${ProjectTag}/Coordinator", "ClientCount" ]
                       ],
                       "region": "${AWS::Region}",
                       "title": "Total number of clients"
@@ -99,7 +99,7 @@ Resources:
                   "height": 3,
                   "properties": {
                       "metrics": [
-                          [ "FedLearn/Coordinator", "SuccessCount" ]
+                          [ "${ProjectTag}/Coordinator", "SuccessCount" ]
                       ],
                       "view": "singleValue",
                       "region": "${AWS::Region}",
@@ -116,7 +116,7 @@ Resources:
                   "height": 3,
                   "properties": {
                       "metrics": [
-                          [ "FedLearn/Coordinator", "FailureCount" ]
+                          [ "${ProjectTag}/Coordinator", "FailureCount" ]
                       ],
                       "view": "singleValue",
                       "region": "${AWS::Region}",
@@ -133,7 +133,7 @@ Resources:
                   "height": 3,
                   "properties": {
                       "metrics": [
-                          [ "FedLearn/Coordinator", "RunTime" ]
+                          [ "${ProjectTag}/Coordinator", "RunTime" ]
                       ],
                       "view": "singleValue",
                       "region": "${AWS::Region}",
@@ -150,7 +150,7 @@ Resources:
                   "height": 6,
                   "properties": {
                       "metrics": [
-                          [ "FedLearn/Proxy", "Accuracy" ]
+                          [ "${ProjectTag}/Proxy", "Accuracy" ]
                       ],
                       "view": "timeSeries",
                       "stacked": false,
@@ -168,7 +168,7 @@ Resources:
                   "height": 6,
                   "properties": {
                       "metrics": [
-                          [ "FedLearn/Proxy", "Loss" ]
+                          [ "${ProjectTag}/Proxy", "Loss" ]
                       ],
                       "view": "timeSeries",
                       "stacked": false,

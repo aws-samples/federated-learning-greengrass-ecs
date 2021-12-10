@@ -1,6 +1,4 @@
 {
-    "GG_ROLE_ARN": "",
-    "GG_GROUP": "",
-    "DEF_UNIQUE_KEY": "",
-    "FN_ARN": ""
+    "STACK_NAME": "fedml",
+    "DEF_UNIQUE_KEY": "6fb690447b9c"
 }
